@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
 const ARC_CHAIN_ID = 5042002;
-const ARC_CHAIN_HEX = "0x4CF4B2";
+const ARC_CHAIN_HEX = "0x4CEF52";
 const ARC_RPC = "https://rpc.testnet.arc.network";
 const ARC_EXPLORER = "https://testnet.arcscan.app";
 const USDC_ADDRESS =
@@ -79,9 +79,6 @@ async function ensureArcNetwork() {
       throw error;
     }
 
-    // IMPORTANT:
-    // Arc uses 18 decimals internally for native transactions, but
-    // wallet network metadata must use 18 decimals; the UI may display 6 decimals.
     await walletRequest("wallet_addEthereumChain", [
       {
         chainId: ARC_CHAIN_HEX,
@@ -111,7 +108,6 @@ async function readNativeBalance(address: string) {
 }
 
 async function readErc20Balance(address: string) {
-  // ERC-20 balanceOf(address) selector = 0x70a08231
   const data =
     "0x70a08231" +
     address.slice(2).toLowerCase().padStart(64, "0");
@@ -146,14 +142,14 @@ function App() {
         );
       }
 
-      await ensureArcNetwork();
-
       const accounts = await walletRequest<string[]>("eth_requestAccounts");
       const address = accounts?.[0];
 
       if (!address) {
         throw new Error("MetaMask chưa trả về địa chỉ ví.");
       }
+
+      await ensureArcNetwork();
 
       setAccount(address);
       setStatus("Đã kết nối MetaMask với Arc Testnet.");
@@ -224,7 +220,6 @@ function App() {
       setTxHash(hash);
       setStatus("Đã gửi giao dịch. Đang chờ Arc xác nhận…");
 
-      // Arc has deterministic finality. Poll the receipt briefly.
       for (let i = 0; i < 20; i++) {
         try {
           const receipt = await walletRequest<any>(
