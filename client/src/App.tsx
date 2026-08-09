@@ -82,14 +82,14 @@ function App() {
     try {
       await window.ethereum.request({
         method: "wallet_switchEthereumChain",
-        params: [{ chainId: "0x4CF4B2" }],
+        params: [{ chainId: "0x4CEF52" }],
       });
     } catch (err: any) {
       if (err?.code !== 4902) throw err;
       await window.ethereum.request({
         method: "wallet_addEthereumChain",
         params: [{
-          chainId: "0x4CF4B2",
+          chainId: "0x4CEF52",
           chainName: "Arc Testnet",
           nativeCurrency: { name: "USDC", symbol: "USDC", decimals: 6 },
           rpcUrls: [ARC_RPC],
@@ -100,16 +100,37 @@ function App() {
   }
 
   async function connect() {
-    try {
-      setStatus("Connecting wallet…");
-      if (!window.ethereum) throw new Error("Install MetaMask/Rabby/Coinbase Wallet first.");
-      await ensureArc();
-      const wallet = createWalletClient({ chain: arcTestnet, transport: custom(window.ethereum) });
-      const addresses = await wallet.requestAddresses();
-      setAccount(addresses[0] as Address);
-      setStatus("Wallet connected.");
-    } catch (e: any) {
-      setStatus(e?.shortMessage || e?.message || "Could not connect.");
+  try {
+    setStatus("Connecting wallet…");
+
+    if (!window.ethereum) {
+      throw new Error("Please install MetaMask first.");
+    }
+
+    const wallet = createWalletClient({
+      chain: arcTestnet,
+      transport: custom(window.ethereum),
+    });
+
+    const addresses = await wallet.requestAddresses();
+
+    if (!addresses[0]) {
+      throw new Error("No MetaMask account selected.");
+    }
+
+    setAccount(addresses[0] as Address);
+
+    await ensureArc();
+
+    setStatus("Wallet connected to Arc Testnet.");
+  } catch (e: any) {
+    setStatus(
+      e?.shortMessage ||
+      e?.message ||
+      "Could not connect to MetaMask."
+    );
+  }
+}
     }
   }
 
