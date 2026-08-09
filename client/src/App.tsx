@@ -1,20 +1,21 @@
 import { useEffect, useState } from "react";
-import {
-  formatUnits,
-  parseUnits,
-  type Address,
-  type EIP1193Provider,
-} from "viem";
 
 const ARC_CHAIN_ID = 5042002;
-const ARC_CHAIN_HEX = "0x4cef52";
+const ARC_CHAIN_HEX = "0x4CF4B2";
 const ARC_RPC = "https://rpc.testnet.arc.network";
 const ARC_EXPLORER = "https://testnet.arcscan.app";
-const USDC = "0x3600000000000000000000000000000000000000" as Address;
+const USDC_ADDRESS =
+  "0x3600000000000000000000000000000000000000";
+
+type EthereumProvider = {
+  request: (args: { method: string; params?: unknown[] }) => Promise<unknown>;
+  on?: (event: string, handler: (...args: any[]) => void) => void;
+  removeListener?: (event: string, handler: (...args: any[]) => void) => void;
+};
 
 declare global {
   interface Window {
-    ethereum?: EIP1193Provider;
+    ethereum?: EthereumProvider;
   }
 }
 
@@ -22,8 +23,33 @@ function shortAddress(value: string) {
   return `${value.slice(0, 6)}…${value.slice(-4)}`;
 }
 
-function txUrl(hash: string) {
+function explorerTx(hash: string) {
   return `${ARC_EXPLORER}/tx/${hash}`;
+}
+
+function parseUnits18(value: string): bigint {
+  const cleaned = value.trim();
+  if (!/^(?:\d+)(?:\.\d{1,18})?$/.test(cleaned)) {
+    throw new Error("Số USDC không hợp lệ. Ví dụ: 10 hoặc 10.25");
+  }
+
+  const [whole, fraction = ""] = cleaned.split(".");
+  return BigInt(whole) * 10n ** 18n +
+    BigInt((fraction + "0".repeat(18)).slice(0, 18));
+}
+
+function formatUnits18(value: bigint): string {
+  const whole = value / 10n ** 18n;
+  const fraction = (value % 10n ** 18n).toString().padStart(18, "0");
+  const display = fraction.slice(0, 6).replace(/0+$/, "");
+  return display ? `${whole}.${display}` : whole.toString();
+}
+
+function formatUnits6(value: bigint): string {
+  const whole = value / 10n ** 6n;
+  const fraction = (value % 10n ** 6n).toString().padStart(6, "0");
+  const display = fraction.replace(/0+$/, "");
+  return display ? `${whole}.${display}` : whole.toString();
 }
 
 async function walletRequest<T = unknown>(
@@ -31,30 +57,31 @@ async function walletRequest<T = unknown>(
   params?: unknown[]
 ): Promise<T> {
   if (!window.ethereum) {
-    throw new Error("Không tìm thấy MetaMask. Hãy cài MetaMask rồi tải lại trang.");
+    throw new Error(
+      "Không tìm thấy MetaMask. Hãy mở trang này bằng trình duyệt đã cài MetaMask."
+    );
   }
-  return (await window.ethereum.request({
-    method,
-    params,
-  })) as T;
+
+  return (await window.ethereum.request({ method, params })) as T;
 }
 
-/**
- * Arc has one USDC balance:
- * - native EVM representation: 18 decimals
- * - ERC-20 USDC interface: 6 decimals
- *
- * The wallet network metadata below deliberately uses 18 decimals so it
- * matches the native transaction representation used by eth_sendTransaction.
- */
 async function ensureArcNetwork() {
+  if (!window.ethereum) {
+    throw new Error("Không tìm thấy MetaMask.");
+  }
+
   try {
     await walletRequest("wallet_switchEthereumChain", [
       { chainId: ARC_CHAIN_HEX },
     ]);
   } catch (error: any) {
-    if (error?.code !== 4902) throw error;
+    if (error?.code !== 4902) {
+      throw error;
+    }
 
+    // IMPORTANT:
+    // Arc uses 18 decimals internally for native transactions, but
+    // the wallet network metadata is configured with 6 display decimals.
     await walletRequest("wallet_addEthereumChain", [
       {
         chainId: ARC_CHAIN_HEX,
@@ -62,7 +89,7 @@ async function ensureArcNetwork() {
         nativeCurrency: {
           name: "USDC",
           symbol: "USDC",
-          decimals: 18,
+          decimals: 6,
         },
         rpcUrls: [ARC_RPC],
         blockExplorerUrls: [ARC_EXPLORER],
@@ -75,27 +102,30 @@ async function ensureArcNetwork() {
   }
 }
 
-async function readNativeBalance(address: Address) {
-  const raw = await walletRequest<string>("eth_getBalance", [address, "latest"]);
-  return formatUnits(BigInt(raw), 18);
+async function readNativeBalance(address: string) {
+  const raw = await walletRequest<string>("eth_getBalance", [
+    address,
+    "latest",
+  ]);
+  return formatUnits18(BigInt(raw));
 }
 
-async function readErc20Balance(address: Address) {
-  // balanceOf(address): 0x70a08231 + 32-byte padded address
+async function readErc20Balance(address: string) {
+  // ERC-20 balanceOf(address) selector = 0x70a08231
   const data =
     "0x70a08231" +
     address.slice(2).toLowerCase().padStart(64, "0");
 
   const raw = await walletRequest<string>("eth_call", [
-    { to: USDC, data },
+    { to: USDC_ADDRESS, data },
     "latest",
   ]);
 
-  return formatUnits(BigInt(raw), 6);
+  return formatUnits6(BigInt(raw));
 }
 
 function App() {
-  const [account, setAccount] = useState<Address | null>(null);
+  const [account, setAccount] = useState<string | null>(null);
   const [balance, setBalance] = useState("0");
   const [erc20Balance, setErc20Balance] = useState("0");
   const [recipient, setRecipient] = useState("");
@@ -108,14 +138,22 @@ function App() {
   async function connectWallet() {
     try {
       setBusy(true);
-      setStatus("Đang kết nối MetaMask…");
+      setStatus("Đang mở MetaMask…");
+
+      if (!window.ethereum) {
+        throw new Error(
+          "Không tìm thấy MetaMask. Hãy cài MetaMask trên trình duyệt này."
+        );
+      }
 
       await ensureArcNetwork();
 
       const accounts = await walletRequest<string[]>("eth_requestAccounts");
-      const address = accounts?.[0] as Address | undefined;
+      const address = accounts?.[0];
 
-      if (!address) throw new Error("MetaMask chưa trả về địa chỉ ví.");
+      if (!address) {
+        throw new Error("MetaMask chưa trả về địa chỉ ví.");
+      }
 
       setAccount(address);
       setStatus("Đã kết nối MetaMask với Arc Testnet.");
@@ -142,6 +180,7 @@ function App() {
 
       setBalance(native);
       setErc20Balance(token);
+      setStatus("Đã cập nhật số dư.");
     } catch (error: any) {
       setStatus(
         error?.shortMessage ||
@@ -157,40 +196,67 @@ function App() {
       setTxHash("");
       setStatus("Đang chuẩn bị giao dịch…");
 
-      if (!account) throw new Error("Hãy kết nối MetaMask trước.");
-      if (!/^0x[a-fA-F0-9]{40}$/.test(recipient)) {
+      if (!account) {
+        throw new Error("Hãy kết nối MetaMask trước.");
+      }
+
+      if (!/^0x[a-fA-F0-9]{40}$/.test(recipient.trim())) {
         throw new Error("Địa chỉ người nhận không hợp lệ.");
       }
-      if (!amount || Number(amount) <= 0) {
-        throw new Error("Hãy nhập số USDC hợp lệ.");
+
+      const value = parseUnits18(amount);
+      if (value <= 0n) {
+        throw new Error("Hãy nhập số USDC lớn hơn 0.");
       }
 
       await ensureArcNetwork();
 
-      // Arc native USDC uses 18 decimals internally.
-      const value = parseUnits(amount, 18);
+      setStatus("Hãy xác nhận giao dịch USDC trong MetaMask…");
 
       const hash = await walletRequest<string>("eth_sendTransaction", [
         {
           from: account,
-          to: recipient as Address,
+          to: recipient.trim(),
           value: `0x${value.toString(16)}`,
         },
       ]);
 
       setTxHash(hash);
-      setStatus(
-        "Đã gửi giao dịch. Arc có finality xác định; kiểm tra giao dịch trên ArcScan."
-      );
+      setStatus("Đã gửi giao dịch. Đang chờ Arc xác nhận…");
 
-      // Give the RPC a moment to expose the updated balance.
-      setTimeout(() => refresh(account), 1200);
-    } catch (error: any) {
+      // Arc has deterministic finality. Poll the receipt briefly.
+      for (let i = 0; i < 20; i++) {
+        try {
+          const receipt = await walletRequest<any>(
+            "eth_getTransactionReceipt",
+            [hash]
+          );
+          if (receipt) {
+            setStatus("Giao dịch đã được xác nhận trên Arc Testnet.");
+            await refresh(account);
+            return;
+          }
+        } catch {
+          // Keep polling.
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, 800));
+      }
+
       setStatus(
-        error?.shortMessage ||
-          error?.message ||
-          "Giao dịch USDC thất bại."
+        "Giao dịch đã được gửi. Bạn có thể mở ArcScan để kiểm tra trạng thái."
       );
+    } catch (error: any) {
+      const message =
+        error?.shortMessage ||
+        error?.message ||
+        "Giao dịch USDC thất bại.";
+
+      if (error?.code === 4001) {
+        setStatus("Bạn đã từ chối giao dịch trong MetaMask.");
+      } else {
+        setStatus(message);
+      }
     } finally {
       setBusy(false);
     }
@@ -201,17 +267,24 @@ function App() {
     if (!ethereum) return;
 
     const onAccountsChanged = (accounts: string[]) => {
-      const address = accounts?.[0] as Address | undefined;
-      setAccount(address || null);
-      if (address) refresh(address);
-      else {
+      const address = accounts?.[0] || null;
+      setAccount(address);
+
+      if (address) {
+        refresh(address);
+      } else {
         setBalance("0");
         setErc20Balance("0");
+        setStatus("Ví đã ngắt kết nối.");
       }
     };
 
-    const onChainChanged = () => {
-      window.location.reload();
+    const onChainChanged = (chainId: string) => {
+      if (chainId.toLowerCase() !== ARC_CHAIN_HEX.toLowerCase()) {
+        setStatus("Vui lòng chuyển MetaMask về Arc Testnet.");
+      } else if (account) {
+        refresh(account);
+      }
     };
 
     ethereum.on?.("accountsChanged", onAccountsChanged);
@@ -221,7 +294,7 @@ function App() {
       ethereum.removeListener?.("accountsChanged", onAccountsChanged);
       ethereum.removeListener?.("chainChanged", onChainChanged);
     };
-  }, []);
+  }, [account]);
 
   return (
     <div className="app">
@@ -231,7 +304,11 @@ function App() {
           <div className="subbrand">Payments & Exchange</div>
         </div>
 
-        <button className="walletBtn" onClick={connectWallet} disabled={busy}>
+        <button
+          className="walletBtn"
+          onClick={connectWallet}
+          disabled={busy}
+        >
           {account ? shortAddress(account) : "Connect MetaMask"}
         </button>
       </header>
@@ -248,12 +325,12 @@ function App() {
 
           <div className="balanceCard">
             <span>USDC balance</span>
-            <strong>{Number(balance).toFixed(4)}</strong>
+            <strong>{balance}</strong>
             <small>Native USDC • 18 decimals internally</small>
 
             {account && (
               <button className="refresh" onClick={() => refresh()}>
-                Refresh
+                Refresh balance
               </button>
             )}
           </div>
@@ -287,6 +364,7 @@ function App() {
                 value={recipient}
                 onChange={(e) => setRecipient(e.target.value)}
                 placeholder="0x…"
+                spellCheck={false}
               />
 
               <label>Amount (USDC)</label>
@@ -309,15 +387,14 @@ function App() {
             <>
               <h2>Exchange</h2>
               <p className="hint">
-                Khu vực Exchange đã được giữ trong giao diện. Hoán đổi USDC
-                ↔ EURC cần một swap route/contract hoặc Circle Swap Kit có
-                cấu hình hợp lệ; không nên giả lập giao dịch hoặc tự ý chuyển
-                tiền tới một contract không xác minh.
+                Chức năng Exchange cần một swap route/contract chính thức.
+                Tôi không giả lập swap và không tự ý chuyển tiền của bạn tới
+                contract chưa xác minh.
               </p>
 
               <div className="status">
-                Thanh toán USDC trên Arc Testnet đã sẵn sàng. Exchange sẽ được
-                bật sau khi cấu hình route swap chính thức.
+                Payment và USDC transfer trên Arc Testnet đã được bật.
+                Exchange sẽ được bật sau khi có route swap hợp lệ.
               </div>
             </>
           )}
@@ -327,7 +404,7 @@ function App() {
           {txHash && (
             <a
               className="tx"
-              href={txUrl(txHash)}
+              href={explorerTx(txHash)}
               target="_blank"
               rel="noreferrer"
             >
@@ -345,14 +422,14 @@ function App() {
 
           <div className="info">
             <span>USDC</span>
-            <strong>{shortAddress(USDC)}</strong>
-            <small>ERC-20 interface • 6 decimals</small>
+            <strong>{shortAddress(USDC_ADDRESS)}</strong>
+            <small>Native + ERC-20 interface</small>
           </div>
 
           <div className="info">
             <span>ERC-20 balance</span>
-            <strong>{Number(erc20Balance).toFixed(4)} USDC</strong>
-            <small>Same underlying USDC balance</small>
+            <strong>{erc20Balance} USDC</strong>
+            <small>Display decimals: 6</small>
           </div>
         </section>
 
