@@ -81,7 +81,7 @@ async function ensureArcNetwork() {
 
     // IMPORTANT:
     // Arc uses 18 decimals internally for native transactions, but
-    // the wallet network metadata is configured with 6 display decimals.
+    // wallet network metadata must use 18 decimals; the UI may display 6 decimals.
     await walletRequest("wallet_addEthereumChain", [
       {
         chainId: ARC_CHAIN_HEX,
@@ -89,7 +89,7 @@ async function ensureArcNetwork() {
         nativeCurrency: {
           name: "USDC",
           symbol: "USDC",
-          decimals: 6,
+          decimals: 18,
         },
         rpcUrls: [ARC_RPC],
         blockExplorerUrls: [ARC_EXPLORER],
