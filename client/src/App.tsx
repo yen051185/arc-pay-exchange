@@ -1,272 +1,195 @@
 import { useEffect, useState } from "react";
 import {
-  createPublicClient,
-  defineChain,
-  encodeFunctionData,
   formatUnits,
-  http,
   parseUnits,
   type Address,
   type EIP1193Provider,
 } from "viem";
 
 const ARC_CHAIN_ID = 5042002;
-const ARC_CHAIN_HEX = "0x4CF4B2";
+const ARC_CHAIN_HEX = "0x4cef52";
 const ARC_RPC = "https://rpc.testnet.arc.network";
 const ARC_EXPLORER = "https://testnet.arcscan.app";
 const USDC = "0x3600000000000000000000000000000000000000" as Address;
-const USDC_DECIMALS = 6;
-
-const arcTestnet = defineChain({
-  id: ARC_CHAIN_ID,
-  name: "Arc Testnet",
-  nativeCurrency: { name: "USDC", symbol: "USDC", decimals: 18 },
-  rpcUrls: { default: { http: [ARC_RPC] } },
-  blockExplorers: {
-    default: { name: "ArcScan", url: ARC_EXPLORER },
-  },
-});
-
-const erc20Abi = [
-  {
-    type: "function",
-    name: "balanceOf",
-    stateMutability: "view",
-    inputs: [{ name: "account", type: "address" }],
-    outputs: [{ name: "", type: "uint256" }],
-  },
-  {
-    type: "function",
-    name: "transfer",
-    stateMutability: "nonpayable",
-    inputs: [
-      { name: "to", type: "address" },
-      { name: "amount", type: "uint256" },
-    ],
-    outputs: [{ name: "", type: "bool" }],
-  },
-] as const;
 
 declare global {
   interface Window {
-    ethereum?: EIP1193Provider & {
-      isMetaMask?: boolean;
-      providers?: Array<EIP1193Provider & { isMetaMask?: boolean }>;
-    };
+    ethereum?: EIP1193Provider;
   }
 }
 
-function getEthereum(): EIP1193Provider | undefined {
-  const ethereum = window.ethereum;
-  if (!ethereum) return undefined;
-
-  // If several injected wallets exist, prefer MetaMask.
-  const providers = ethereum.providers;
-  if (providers?.length) {
-    return providers.find((p) => p.isMetaMask) ?? providers[0];
-  }
-
-  return ethereum;
+function shortAddress(value: string) {
+  return `${value.slice(0, 6)}…${value.slice(-4)}`;
 }
 
-const publicClient = createPublicClient({
-  chain: arcTestnet,
-  transport: http(ARC_RPC),
-});
-
-function shortAddress(address: string) {
-  return `${address.slice(0, 6)}…${address.slice(-4)}`;
-}
-
-function explorerTx(hash: string) {
+function txUrl(hash: string) {
   return `${ARC_EXPLORER}/tx/${hash}`;
 }
 
-async function addOrSwitchArc(provider: EIP1193Provider) {
+async function walletRequest<T = unknown>(
+  method: string,
+  params?: unknown[]
+): Promise<T> {
+  if (!window.ethereum) {
+    throw new Error("Không tìm thấy MetaMask. Hãy cài MetaMask rồi tải lại trang.");
+  }
+  return (await window.ethereum.request({
+    method,
+    params,
+  })) as T;
+}
+
+/**
+ * Arc has one USDC balance:
+ * - native EVM representation: 18 decimals
+ * - ERC-20 USDC interface: 6 decimals
+ *
+ * The wallet network metadata below deliberately uses 18 decimals so it
+ * matches the native transaction representation used by eth_sendTransaction.
+ */
+async function ensureArcNetwork() {
   try {
-    await provider.request({
-      method: "wallet_switchEthereumChain",
-      params: [{ chainId: ARC_CHAIN_HEX }],
-    });
+    await walletRequest("wallet_switchEthereumChain", [
+      { chainId: ARC_CHAIN_HEX },
+    ]);
   } catch (error: any) {
     if (error?.code !== 4902) throw error;
 
-    await provider.request({
-      method: "wallet_addEthereumChain",
-      params: [
-        {
-          chainId: ARC_CHAIN_HEX,
-          chainName: "Arc Testnet",
-          nativeCurrency: {
-            name: "USDC",
-            symbol: "USDC",
-            decimals: 18,
-          },
-          rpcUrls: [ARC_RPC],
-          blockExplorerUrls: [ARC_EXPLORER],
+    await walletRequest("wallet_addEthereumChain", [
+      {
+        chainId: ARC_CHAIN_HEX,
+        chainName: "Arc Testnet",
+        nativeCurrency: {
+          name: "USDC",
+          symbol: "USDC",
+          decimals: 18,
         },
-      ],
-    });
+        rpcUrls: [ARC_RPC],
+        blockExplorerUrls: [ARC_EXPLORER],
+      },
+    ]);
 
-    // Some wallets add the chain but do not switch automatically.
-    try {
-      await provider.request({
-        method: "wallet_switchEthereumChain",
-        params: [{ chainId: ARC_CHAIN_HEX }],
-      });
-    } catch {
-      // If the wallet already switched, this second request is harmless.
-    }
+    await walletRequest("wallet_switchEthereumChain", [
+      { chainId: ARC_CHAIN_HEX },
+    ]);
   }
+}
+
+async function readNativeBalance(address: Address) {
+  const raw = await walletRequest<string>("eth_getBalance", [address, "latest"]);
+  return formatUnits(BigInt(raw), 18);
+}
+
+async function readErc20Balance(address: Address) {
+  // balanceOf(address): 0x70a08231 + 32-byte padded address
+  const data =
+    "0x70a08231" +
+    address.slice(2).toLowerCase().padStart(64, "0");
+
+  const raw = await walletRequest<string>("eth_call", [
+    { to: USDC, data },
+    "latest",
+  ]);
+
+  return formatUnits(BigInt(raw), 6);
 }
 
 function App() {
   const [account, setAccount] = useState<Address | null>(null);
-  const [balance, setBalance] = useState("0.000000");
+  const [balance, setBalance] = useState("0");
+  const [erc20Balance, setErc20Balance] = useState("0");
   const [recipient, setRecipient] = useState("");
   const [amount, setAmount] = useState("");
-  const [status, setStatus] = useState(
-    "Connect MetaMask to use Arc Testnet."
-  );
+  const [status, setStatus] = useState("");
   const [txHash, setTxHash] = useState("");
   const [busy, setBusy] = useState(false);
+  const [tab, setTab] = useState<"pay" | "exchange">("pay");
 
   async function connectWallet() {
-    const provider = getEthereum();
-
-    if (!provider) {
-      setStatus(
-        "MetaMask was not detected. Please install/unlock MetaMask and refresh this page."
-      );
-      return;
-    }
-
     try {
       setBusy(true);
-      setStatus("Opening MetaMask…");
-      setTxHash("");
+      setStatus("Đang kết nối MetaMask…");
 
-      // First request access to the account. This is intentionally done
-      // before asking MetaMask to switch networks.
-      const accounts = (await provider.request({
-        method: "eth_requestAccounts",
-      })) as string[];
+      await ensureArcNetwork();
 
-      if (!accounts?.[0]) {
-        throw new Error("No MetaMask account was selected.");
-      }
+      const accounts = await walletRequest<string[]>("eth_requestAccounts");
+      const address = accounts?.[0] as Address | undefined;
 
-      const address = accounts[0] as Address;
+      if (!address) throw new Error("MetaMask chưa trả về địa chỉ ví.");
+
       setAccount(address);
-
-      setStatus("Switching to Arc Testnet…");
-      await addOrSwitchArc(provider);
-
-      setStatus("Connected to Arc Testnet.");
-      await loadBalance(address);
+      setStatus("Đã kết nối MetaMask với Arc Testnet.");
+      await refresh(address);
     } catch (error: any) {
-      const message =
+      setStatus(
         error?.shortMessage ||
-        error?.message ||
-        "MetaMask connection was cancelled or failed.";
-      setStatus(message);
+          error?.message ||
+          "Không thể kết nối MetaMask."
+      );
     } finally {
       setBusy(false);
     }
   }
 
-  async function loadBalance(address = account) {
+  async function refresh(address = account) {
     if (!address) return;
 
     try {
-      // Use the standard ERC-20 interface. Arc documents this as the
-      // recommended way to read/send USDC and avoid native/ERC-20
-      // decimal confusion.
-      const raw = await publicClient.readContract({
-        address: USDC,
-        abi: erc20Abi,
-        functionName: "balanceOf",
-        args: [address],
-      });
+      const [native, token] = await Promise.all([
+        readNativeBalance(address),
+        readErc20Balance(address),
+      ]);
 
-      setBalance(formatUnits(raw, USDC_DECIMALS));
+      setBalance(native);
+      setErc20Balance(token);
     } catch (error: any) {
       setStatus(
         error?.shortMessage ||
           error?.message ||
-          "Could not read your USDC balance."
+          "Không thể đọc số dư Arc Testnet."
       );
     }
   }
 
-  async function sendPayment() {
-    const provider = getEthereum();
-
-    if (!provider) {
-      setStatus("MetaMask was not detected.");
-      return;
-    }
-
-    if (!account) {
-      setStatus("Connect MetaMask first.");
-      return;
-    }
-
-    if (!/^0x[a-fA-F0-9]{40}$/.test(recipient)) {
-      setStatus("Please enter a valid recipient wallet address.");
-      return;
-    }
-
-    if (!amount || Number(amount) <= 0) {
-      setStatus("Please enter a valid USDC amount.");
-      return;
-    }
-
+  async function sendUSDC() {
     try {
       setBusy(true);
-      setStatus("Preparing USDC payment…");
       setTxHash("");
+      setStatus("Đang chuẩn bị giao dịch…");
 
-      await addOrSwitchArc(provider);
+      if (!account) throw new Error("Hãy kết nối MetaMask trước.");
+      if (!/^0x[a-fA-F0-9]{40}$/.test(recipient)) {
+        throw new Error("Địa chỉ người nhận không hợp lệ.");
+      }
+      if (!amount || Number(amount) <= 0) {
+        throw new Error("Hãy nhập số USDC hợp lệ.");
+      }
 
-      const value = parseUnits(amount, USDC_DECIMALS);
+      await ensureArcNetwork();
 
-      // Send the ERC-20 transaction directly through MetaMask.
-      // This deliberately avoids viem's walletClient chain metadata
-      // validation so MetaMask is the component that handles gas/network.
-      const data = encodeFunctionData({
-        abi: erc20Abi,
-        functionName: "transfer",
-        args: [recipient as Address, value],
-      });
+      // Arc native USDC uses 18 decimals internally.
+      const value = parseUnits(amount, 18);
 
-      setStatus("Please confirm the USDC transaction in MetaMask…");
-
-      const hash = (await provider.request({
-        method: "eth_sendTransaction",
-        params: [
-          {
-            from: account,
-            to: USDC,
-            data,
-            value: "0x0",
-          },
-        ],
-      })) as string;
+      const hash = await walletRequest<string>("eth_sendTransaction", [
+        {
+          from: account,
+          to: recipient as Address,
+          value: `0x${value.toString(16)}`,
+        },
+      ]);
 
       setTxHash(hash);
-      setStatus("Transaction submitted. Waiting for confirmation…");
+      setStatus(
+        "Đã gửi giao dịch. Arc có finality xác định; kiểm tra giao dịch trên ArcScan."
+      );
 
-      await publicClient.waitForTransactionReceipt({ hash });
-
-      setStatus("Payment confirmed on Arc Testnet.");
-      setAmount("");
-      await loadBalance(account);
+      // Give the RPC a moment to expose the updated balance.
+      setTimeout(() => refresh(account), 1200);
     } catch (error: any) {
       setStatus(
         error?.shortMessage ||
           error?.message ||
-          "The USDC payment failed."
+          "Giao dịch USDC thất bại."
       );
     } finally {
       setBusy(false);
@@ -274,267 +197,168 @@ function App() {
   }
 
   useEffect(() => {
-    const provider = getEthereum();
-    if (!provider) return;
+    const ethereum = window.ethereum;
+    if (!ethereum) return;
 
     const onAccountsChanged = (accounts: string[]) => {
-      const next = accounts?.[0] as Address | undefined;
-      setAccount(next || null);
-      if (next) {
-        loadBalance(next);
-        setStatus("Wallet account changed.");
-      } else {
-        setBalance("0.000000");
-        setStatus("Wallet disconnected.");
+      const address = accounts?.[0] as Address | undefined;
+      setAccount(address || null);
+      if (address) refresh(address);
+      else {
+        setBalance("0");
+        setErc20Balance("0");
       }
     };
 
-    const onChainChanged = (chainId: string) => {
-      if (chainId?.toLowerCase() === ARC_CHAIN_HEX.toLowerCase()) {
-        setStatus("Connected to Arc Testnet.");
-        if (account) loadBalance(account);
-      } else {
-        setStatus("Please switch MetaMask back to Arc Testnet.");
-      }
+    const onChainChanged = () => {
+      window.location.reload();
     };
 
-    const p = provider as any;
-    p.on?.("accountsChanged", onAccountsChanged);
-    p.on?.("chainChanged", onChainChanged);
+    ethereum.on?.("accountsChanged", onAccountsChanged);
+    ethereum.on?.("chainChanged", onChainChanged);
 
     return () => {
-      p.removeListener?.("accountsChanged", onAccountsChanged);
-      p.removeListener?.("chainChanged", onChainChanged);
+      ethereum.removeListener?.("accountsChanged", onAccountsChanged);
+      ethereum.removeListener?.("chainChanged", onChainChanged);
     };
-  }, [account]);
-
-  const card: React.CSSProperties = {
-    background: "white",
-    border: "1px solid #e5e7eb",
-    borderRadius: 18,
-    padding: 24,
-    boxShadow: "0 8px 30px rgba(0,0,0,0.06)",
-  };
-
-  const button: React.CSSProperties = {
-    width: "100%",
-    border: 0,
-    borderRadius: 12,
-    padding: "13px 16px",
-    fontSize: 16,
-    fontWeight: 700,
-    cursor: busy ? "wait" : "pointer",
-    background: "#111827",
-    color: "white",
-  };
+  }, []);
 
   return (
-    <div
-      style={{
-        minHeight: "100vh",
-        background: "#f5f7fb",
-        fontFamily:
-          "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif",
-        color: "#111827",
-      }}
-    >
-      <header
-        style={{
-          background: "#111827",
-          color: "white",
-          padding: "18px 24px",
-        }}
-      >
-        <div
-          style={{
-            maxWidth: 980,
-            margin: "0 auto",
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            gap: 16,
-          }}
-        >
-          <div>
-            <div style={{ fontSize: 21, fontWeight: 800 }}>
-              Arc Pay & Exchange
-            </div>
-            <div style={{ opacity: 0.75, fontSize: 13 }}>
-              Arc Testnet · USDC payments
-            </div>
-          </div>
-
-          <button
-            onClick={connectWallet}
-            disabled={busy}
-            style={{
-              ...button,
-              width: "auto",
-              background: "#ffffff",
-              color: "#111827",
-              padding: "10px 15px",
-            }}
-          >
-            {account ? shortAddress(account) : "Connect MetaMask"}
-          </button>
+    <div className="app">
+      <header className="topbar">
+        <div>
+          <div className="brand">ARC PAY</div>
+          <div className="subbrand">Payments & Exchange</div>
         </div>
+
+        <button className="walletBtn" onClick={connectWallet} disabled={busy}>
+          {account ? shortAddress(account) : "Connect MetaMask"}
+        </button>
       </header>
 
-      <main
-        style={{
-          maxWidth: 980,
-          margin: "0 auto",
-          padding: "34px 20px 60px",
-        }}
-      >
-        <section
-          style={{
-            ...card,
-            marginBottom: 20,
-            background: "linear-gradient(135deg, #111827, #374151)",
-            color: "white",
-          }}
-        >
-          <div style={{ fontSize: 13, opacity: 0.7 }}>ARC TESTNET</div>
-          <div
-            style={{
-              fontSize: 38,
-              fontWeight: 800,
-              marginTop: 6,
-              letterSpacing: -1,
-            }}
-          >
-            {balance} USDC
+      <main className="container">
+        <section className="hero">
+          <div>
+            <span className="pill">ARC TESTNET</span>
+            <h1>Pay and exchange with USDC.</h1>
+            <p>
+              Thanh toán USDC trực tiếp từ MetaMask trên Arc Testnet.
+            </p>
           </div>
-          <div style={{ marginTop: 10, opacity: 0.78 }}>
-            {account ? shortAddress(account) : "Wallet not connected"}
+
+          <div className="balanceCard">
+            <span>USDC balance</span>
+            <strong>{Number(balance).toFixed(4)}</strong>
+            <small>Native USDC • 18 decimals internally</small>
+
+            {account && (
+              <button className="refresh" onClick={() => refresh()}>
+                Refresh
+              </button>
+            )}
           </div>
+        </section>
+
+        <section className="tabs">
           <button
-            onClick={() => loadBalance()}
-            disabled={!account || busy}
-            style={{
-              marginTop: 18,
-              border: "1px solid rgba(255,255,255,.25)",
-              background: "rgba(255,255,255,.1)",
-              color: "white",
-              borderRadius: 10,
-              padding: "9px 13px",
-              cursor: account && !busy ? "pointer" : "not-allowed",
-            }}
+            className={tab === "pay" ? "active" : ""}
+            onClick={() => setTab("pay")}
           >
-            Refresh balance
+            Pay
+          </button>
+          <button
+            className={tab === "exchange" ? "active" : ""}
+            onClick={() => setTab("exchange")}
+          >
+            Exchange
           </button>
         </section>
 
-        <section style={card}>
-          <h2 style={{ marginTop: 0, marginBottom: 6 }}>Send USDC</h2>
-          <p style={{ marginTop: 0, color: "#6b7280" }}>
-            Send USDC to another EVM wallet on Arc Testnet.
-          </p>
+        <section className="panel">
+          {tab === "pay" ? (
+            <>
+              <h2>Send USDC</h2>
+              <p className="hint">
+                Gửi USDC native tới một ví EVM khác trên Arc Testnet.
+              </p>
 
-          <label style={{ display: "block", fontWeight: 700, marginTop: 20 }}>
-            Recipient address
-          </label>
-          <input
-            value={recipient}
-            onChange={(e) => setRecipient(e.target.value.trim())}
-            placeholder="0x..."
-            spellCheck={false}
-            style={{
-              width: "100%",
-              boxSizing: "border-box",
-              marginTop: 8,
-              border: "1px solid #d1d5db",
-              borderRadius: 10,
-              padding: 13,
-              fontSize: 15,
-            }}
-          />
+              <label>Recipient address</label>
+              <input
+                value={recipient}
+                onChange={(e) => setRecipient(e.target.value)}
+                placeholder="0x…"
+              />
 
-          <label style={{ display: "block", fontWeight: 700, marginTop: 16 }}>
-            Amount (USDC)
-          </label>
-          <input
-            value={amount}
-            onChange={(e) => setAmount(e.target.value)}
-            placeholder="1.00"
-            inputMode="decimal"
-            style={{
-              width: "100%",
-              boxSizing: "border-box",
-              marginTop: 8,
-              border: "1px solid #d1d5db",
-              borderRadius: 10,
-              padding: 13,
-              fontSize: 15,
-            }}
-          />
+              <label>Amount (USDC)</label>
+              <input
+                value={amount}
+                onChange={(e) => setAmount(e.target.value)}
+                placeholder="10.00"
+                inputMode="decimal"
+              />
 
-          <button
-            onClick={sendPayment}
-            disabled={busy || !account}
-            style={{
-              ...button,
-              marginTop: 20,
-              opacity: busy || !account ? 0.55 : 1,
-            }}
-          >
-            {busy ? "Processing…" : "Send USDC"}
-          </button>
+              <button
+                className="primary"
+                disabled={busy || !account}
+                onClick={sendUSDC}
+              >
+                {busy ? "Processing…" : "Send USDC"}
+              </button>
+            </>
+          ) : (
+            <>
+              <h2>Exchange</h2>
+              <p className="hint">
+                Khu vực Exchange đã được giữ trong giao diện. Hoán đổi USDC
+                ↔ EURC cần một swap route/contract hoặc Circle Swap Kit có
+                cấu hình hợp lệ; không nên giả lập giao dịch hoặc tự ý chuyển
+                tiền tới một contract không xác minh.
+              </p>
 
-          <div
-            style={{
-              marginTop: 18,
-              padding: 14,
-              borderRadius: 10,
-              background: "#f3f4f6",
-              color: "#374151",
-              fontSize: 14,
-              lineHeight: 1.5,
-            }}
-          >
-            <strong>Status:</strong> {status}
-          </div>
+              <div className="status">
+                Thanh toán USDC trên Arc Testnet đã sẵn sàng. Exchange sẽ được
+                bật sau khi cấu hình route swap chính thức.
+              </div>
+            </>
+          )}
+
+          {status && <div className="status">{status}</div>}
 
           {txHash && (
-            <div style={{ marginTop: 14 }}>
-              <a
-                href={explorerTx(txHash)}
-                target="_blank"
-                rel="noreferrer"
-                style={{ color: "#2563eb", fontWeight: 700 }}
-              >
-                View transaction on ArcScan →
-              </a>
-            </div>
+            <a
+              className="tx"
+              href={txUrl(txHash)}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Xem giao dịch trên ArcScan ↗
+            </a>
           )}
         </section>
 
-        <section
-          style={{
-            ...card,
-            marginTop: 20,
-            background: "#fff7ed",
-            borderColor: "#fed7aa",
-          }}
-        >
-          <strong>Exchange</strong>
-          <p style={{ marginBottom: 0, color: "#7c2d12", lineHeight: 1.5 }}>
-            USDC ⇄ EURC exchange is temporarily disabled while we complete the
-            server-side swap integration. The payment wallet connection and
-            USDC transfer are the stable testnet functions in this version.
-          </p>
+        <section className="infoGrid">
+          <div className="info">
+            <span>Network</span>
+            <strong>Arc Testnet</strong>
+            <small>Chain ID {ARC_CHAIN_ID}</small>
+          </div>
+
+          <div className="info">
+            <span>USDC</span>
+            <strong>{shortAddress(USDC)}</strong>
+            <small>ERC-20 interface • 6 decimals</small>
+          </div>
+
+          <div className="info">
+            <span>ERC-20 balance</span>
+            <strong>{Number(erc20Balance).toFixed(4)} USDC</strong>
+            <small>Same underlying USDC balance</small>
+          </div>
         </section>
 
-        <footer
-          style={{
-            textAlign: "center",
-            marginTop: 28,
-            color: "#6b7280",
-            fontSize: 13,
-          }}
-        >
-          Arc Testnet · Chain ID {ARC_CHAIN_ID} · USDC
+        <footer>
+          Testnet only. Tokens have no real-world value. Never enter a private
+          key or seed phrase into this app.
         </footer>
       </main>
     </div>
