@@ -1,9 +1,8 @@
 import { useEffect, useState } from "react";
 import {
   createPublicClient,
-  createWalletClient,
-  custom,
   defineChain,
+  encodeFunctionData,
   formatUnits,
   http,
   parseUnits,
@@ -101,7 +100,7 @@ async function addOrSwitchArc(provider: EIP1193Provider) {
           nativeCurrency: {
             name: "USDC",
             symbol: "USDC",
-            decimals: 6,
+            decimals: 18,
           },
           rpcUrls: [ARC_RPC],
           blockExplorerUrls: [ARC_EXPLORER],
@@ -230,20 +229,30 @@ function App() {
 
       await addOrSwitchArc(provider);
 
-      const wallet = createWalletClient({
-        account,
-        chain: arcTestnet,
-        transport: custom(provider),
-      });
-
       const value = parseUnits(amount, USDC_DECIMALS);
 
-      const hash = await wallet.writeContract({
-        address: USDC,
+      // Send the ERC-20 transaction directly through MetaMask.
+      // This deliberately avoids viem's walletClient chain metadata
+      // validation so MetaMask is the component that handles gas/network.
+      const data = encodeFunctionData({
         abi: erc20Abi,
         functionName: "transfer",
         args: [recipient as Address, value],
       });
+
+      setStatus("Please confirm the USDC transaction in MetaMask…");
+
+      const hash = (await provider.request({
+        method: "eth_sendTransaction",
+        params: [
+          {
+            from: account,
+            to: USDC,
+            data,
+            value: "0x0",
+          },
+        ],
+      })) as string;
 
       setTxHash(hash);
       setStatus("Transaction submitted. Waiting for confirmation…");
