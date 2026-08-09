@@ -1,0 +1,25 @@
+{
+  "name": "arc-pay-exchange-client",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@circle-fin/adapter-viem-v2": "latest",
+    "@circle-fin/swap-kit": "latest",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "viem": "^2.30.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.10",
+    "@types/react-dom": "^19.1.7",
+    "@vitejs/plugin-react": "^5.0.2",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.2"
+  }
+}
